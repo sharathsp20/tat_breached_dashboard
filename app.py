@@ -5,47 +5,25 @@ import pandas as pd
 st.set_page_config(page_title="ONDC TAT Breach Dashboard", layout="wide")
 st.title("ONDC TAT Breach Dashboard")
 
-# ------------------ Theme Toggle ----------------
-with st.sidebar:
-    st.markdown("### Appearance")
-    dark_mode = st.toggle("Dark mode", value=False, help="Toggle between light and dark UI")
-
-def apply_theme(dark: bool):
-    # Minimal CSS theme overlay (keeps Streamlit look & feel, just adjusts colors)
-    if dark:
-        st.markdown("""
-        <style>
-        html, body, [class^="css"]  {
-            background-color: #0f1115 !important;
-            color: #e8e8e8 !important;
-        }
-        .stMetric label, .stMarkdown, .stDataFrame, .stDownloadButton, .stButton, .stText, div, span, p, h1, h2, h3, h4 {
-            color: #e8e8e8 !important;
-        }
-        .block-container { padding-top: 1.5rem; }
-        .stDataFrame [data-testid="stTable"] th { background:#161a22 !important; color:#e8e8e8 !important; }
-        .stDataFrame [data-testid="stTable"] td { background:#0f1115 !important; color:#e8e8e8 !important; }
-        .stDownloadButton > button, .stButton > button { background:#1f2430 !important; color:#e8e8e8 !important; border:1px solid #2b3240 !important; }
-        </style>
-        """, unsafe_allow_html=True)
-    else:
-        st.markdown("""
-        <style>
-        html, body, [class^="css"]  {
-            background-color: #ffffff !important;
-            color: #111827 !important;
-        }
-        .stMetric label, .stMarkdown, .stDataFrame, .stDownloadButton, .stButton, .stText, div, span, p, h1, h2, h3, h4 {
-            color: #111827 !important;
-        }
-        .block-container { padding-top: 1.5rem; }
-        .stDataFrame [data-testid="stTable"] th { background:#f3f4f6 !important; color:#111827 !important; }
-        .stDataFrame [data-testid="stTable"] td { background:#ffffff !important; color:#111827 !important; }
-        .stDownloadButton > button, .stButton > button { background:#ffffff !important; color:#111827 !important; border:1px solid #d1d5db !important; }
-        </style>
-        """, unsafe_allow_html=True)
-
-apply_theme(dark_mode)
+# ------------------ Base Light Theme ------------
+st.markdown("""
+<style>
+html, body, [class^="css"]  {
+    background-color: #ffffff !important;
+    color: #111827 !important;
+}
+.block-container { padding-top: 1.5rem; }
+.stDataFrame [data-testid="stTable"] th {
+    background:#f3f4f6 !important; color:#111827 !important;
+}
+.stDataFrame [data-testid="stTable"] td {
+    background:#ffffff !important; color:#111827 !important;
+}
+.stDownloadButton > button, .stButton > button {
+    background:#ffffff !important; color:#111827 !important; border:1px solid #d1d5db !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # ------------------ Helpers ---------------------
 def normalize(s: str) -> str:
@@ -80,8 +58,8 @@ STAGE_LABELS = {
 THRESHOLDS = {
     "created_to_placed": 5,
     "placed_to_accepted": 7,
-    "accepted_to_in_kitchen": 5,  # part of 20
-    "in_kitchen_to_ready": 15,    # part of 20
+    "accepted_to_in_kitchen": 5,
+    "in_kitchen_to_ready": 15,
     "ready_to_shipped": 10,
 }
 STAGE_ORDER = list(STAGE_LABELS.keys())
@@ -122,7 +100,7 @@ NOTES_ID_ALIASES = [
 ]
 NOTES_COL_ALIASES = {
     "noteAt": ["Created at", "Note Time", "Created On", "Created"],
-    "description": ["Description", "Notes", "Comment", "Body"],  # optional
+    "description": ["Description", "Notes", "Comment", "Body"],
 }
 
 def pick(row: pd.Series, candidates):
@@ -152,7 +130,7 @@ def validate_notes_columns(df: pd.DataFrame):
         miss.append("Notes: any of " + ", ".join(NOTES_ID_ALIASES))
     if not has_any(df.columns, NOTES_COL_ALIASES["noteAt"]):
         miss.append("Notes: any of " + ", ".join(NOTES_COL_ALIASES["noteAt"]))
-    return miss  # description optional
+    return miss
 
 def map_orders(df: pd.DataFrame) -> pd.DataFrame:
     out = []
@@ -181,11 +159,7 @@ def map_notes(df: pd.DataFrame) -> pd.DataFrame:
         })
     return pd.DataFrame(out)
 
-# ------------------ Smart loader -----------------
 def load_with_header_auto(file, preferred_header_index=None, is_orders=False):
-    """Try preferred header row first, else scan first 30 rows for a valid header."""
-    tried = []
-
     def _read(idx):
         try:
             return pd.read_excel(file, sheet_name=0, header=idx)
@@ -195,14 +169,11 @@ def load_with_header_auto(file, preferred_header_index=None, is_orders=False):
     if preferred_header_index is not None:
         df = _read(preferred_header_index)
         if df is not None:
-            tried.append(preferred_header_index)
             miss = validate_orders_columns(df) if is_orders else validate_notes_columns(df)
             if not miss:
                 return df
 
     for idx in range(0, 31):
-        if idx in tried: 
-            continue
         df = _read(idx)
         if df is None:
             continue
@@ -210,10 +181,9 @@ def load_with_header_auto(file, preferred_header_index=None, is_orders=False):
         if not miss:
             return df
 
-    # Fallback even if invalid so user sees what was read
     return _read(preferred_header_index or 0)
 
-# ------------------ Uploads ----------------------
+# ------------------ Upload ----------------------
 with st.sidebar:
     st.markdown("### Upload Excel files")
     orders_file = st.file_uploader("Orders workbook (headers start on row 12)", type=["xlsx","xls"])
@@ -223,7 +193,6 @@ if not orders_file or not notes_file:
     st.info("Upload both **Orders** and **Notes** Excel files to begin.")
     st.stop()
 
-# Orders header on row 12 (index 11) by default
 orders_raw = load_with_header_auto(orders_file, preferred_header_index=11, is_orders=True)
 notes_raw  = load_with_header_auto(notes_file, preferred_header_index=0,  is_orders=False)
 
@@ -239,7 +208,7 @@ if miss_orders or miss_notes:
 orders = map_orders(orders_raw)
 notes  = map_notes(notes_raw)
 
-# ------------------ Enrichment -------------------
+# ------------------ Enrich -----------------------
 notes = notes.sort_values("noteAt", na_position="first")
 notes_by_id = notes.groupby("id")
 
@@ -261,7 +230,6 @@ for _, row in orders.iterrows():
     })
 
 # ------------------ KPIs -------------------------
-# Existing KPIs
 counts_by_stage = {k:0 for k in STAGE_ORDER}
 orders_with_breach = 0
 for er in enriched:
@@ -274,9 +242,8 @@ for er in enriched:
         orders_with_breach += 1
 total_breaches = sum(counts_by_stage.values())
 
-# NEW KPIs
-total_notes_created = len(notes)  # total number of notes
-orders_with_notes = notes["id"].nunique()  # distinct orders that have at least one note
+total_notes_created = len(notes)
+orders_with_notes = notes["id"].nunique()
 
 st.subheader("Metrics")
 c1, c2, c3, c4, c5, c6 = st.columns(6)
@@ -287,7 +254,7 @@ c4.metric("Total Breaches (All Stages)", f"{total_breaches}")
 c5.metric("Total Notes Created", f"{total_notes_created}")
 c6.metric("Orders With Notes", f"{orders_with_notes}")
 
-# ------------------ Summary Table ----------------
+# ------------------ Summary ---------------------
 st.subheader("Breach Summary by Stage")
 summary_df = pd.DataFrame([{
     "Stage": STAGE_LABELS[k],
@@ -298,7 +265,7 @@ st.dataframe(summary_df, use_container_width=True)
 st.download_button("Download Summary CSV", summary_df.to_csv(index=False).encode("utf-8"),
                    file_name="breach_summary_by_stage.csv", mime="text/csv")
 
-# ------------------ Output Table -----------------
+# ------------------ Output Table ----------------
 st.subheader("Order-Level Details (📊 Output Example)")
 out_rows = []
 for er in enriched:
@@ -325,4 +292,4 @@ st.dataframe(out_df, use_container_width=True)
 st.download_button("Download Output CSV", out_df.to_csv(index=False).encode("utf-8"),
                    file_name="order_level_output.csv", mime="text/csv")
 
-st.caption("Notes: Orders loader assumes headers at row 12 by default and auto-detects if structure varies. Toggle Light/Dark mode from the sidebar.")
+st.caption("Note: Orders loader assumes headers at row 12 by default and auto-detects if structure varies.")
