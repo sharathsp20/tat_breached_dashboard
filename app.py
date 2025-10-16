@@ -1,12 +1,53 @@
 import streamlit as st
 import pandas as pd
 
+# ------------------ App Config ------------------
 st.set_page_config(page_title="ONDC TAT Breach Dashboard", layout="wide")
 st.title("ONDC TAT Breach Dashboard")
 
-# =========================
-# Helpers
-# =========================
+# ------------------ Theme Toggle ----------------
+with st.sidebar:
+    st.markdown("### Appearance")
+    dark_mode = st.toggle("Dark mode", value=False, help="Toggle between light and dark UI")
+
+def apply_theme(dark: bool):
+    # Minimal CSS theme overlay (keeps Streamlit look & feel, just adjusts colors)
+    if dark:
+        st.markdown("""
+        <style>
+        html, body, [class^="css"]  {
+            background-color: #0f1115 !important;
+            color: #e8e8e8 !important;
+        }
+        .stMetric label, .stMarkdown, .stDataFrame, .stDownloadButton, .stButton, .stText, div, span, p, h1, h2, h3, h4 {
+            color: #e8e8e8 !important;
+        }
+        .block-container { padding-top: 1.5rem; }
+        .stDataFrame [data-testid="stTable"] th { background:#161a22 !important; color:#e8e8e8 !important; }
+        .stDataFrame [data-testid="stTable"] td { background:#0f1115 !important; color:#e8e8e8 !important; }
+        .stDownloadButton > button, .stButton > button { background:#1f2430 !important; color:#e8e8e8 !important; border:1px solid #2b3240 !important; }
+        </style>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown("""
+        <style>
+        html, body, [class^="css"]  {
+            background-color: #ffffff !important;
+            color: #111827 !important;
+        }
+        .stMetric label, .stMarkdown, .stDataFrame, .stDownloadButton, .stButton, .stText, div, span, p, h1, h2, h3, h4 {
+            color: #111827 !important;
+        }
+        .block-container { padding-top: 1.5rem; }
+        .stDataFrame [data-testid="stTable"] th { background:#f3f4f6 !important; color:#111827 !important; }
+        .stDataFrame [data-testid="stTable"] td { background:#ffffff !important; color:#111827 !important; }
+        .stDownloadButton > button, .stButton > button { background:#ffffff !important; color:#111827 !important; border:1px solid #d1d5db !important; }
+        </style>
+        """, unsafe_allow_html=True)
+
+apply_theme(dark_mode)
+
+# ------------------ Helpers ---------------------
 def normalize(s: str) -> str:
     return str(s or "").lower().strip().replace("\n", " ").replace("\t", " ").replace("  ", " ")
 
@@ -28,9 +69,7 @@ def fmt_time(x):
     try: return pd.to_datetime(x).strftime("%H:%M")
     except: return "—"
 
-# =========================
-# Stage labels & thresholds
-# =========================
+# ------------------ Stage config ----------------
 STAGE_LABELS = {
     "created_to_placed": "Created → Placed",
     "placed_to_accepted": "Placed → Accepted",
@@ -65,9 +104,7 @@ def compute_breaches(order_row: pd.Series):
         first_breach = breached[0]
     return stages, first_breach
 
-# =========================
-# Aliases for flexible header matching
-# =========================
+# ------------------ Header aliasing --------------
 ORDER_ID_ALIASES = [
     "Network Order Id", "Network Order ID", "Network order id", "order id",
     "Order ID", "Order No", "Order Number", "Order #", "Order Reference", "Network Ref"
@@ -115,8 +152,7 @@ def validate_notes_columns(df: pd.DataFrame):
         miss.append("Notes: any of " + ", ".join(NOTES_ID_ALIASES))
     if not has_any(df.columns, NOTES_COL_ALIASES["noteAt"]):
         miss.append("Notes: any of " + ", ".join(NOTES_COL_ALIASES["noteAt"]))
-    # description optional
-    return miss
+    return miss  # description optional
 
 def map_orders(df: pd.DataFrame) -> pd.DataFrame:
     out = []
@@ -145,24 +181,17 @@ def map_notes(df: pd.DataFrame) -> pd.DataFrame:
         })
     return pd.DataFrame(out)
 
-# =========================
-# Smart header-row loader
-# =========================
+# ------------------ Smart loader -----------------
 def load_with_header_auto(file, preferred_header_index=None, is_orders=False):
-    """
-    Try preferred header row first (e.g., 11 for orders). If columns don't validate,
-    scan the first 30 rows to find a header row that matches.
-    """
+    """Try preferred header row first, else scan first 30 rows for a valid header."""
     tried = []
 
     def _read(idx):
         try:
-            df = pd.read_excel(file, sheet_name=0, header=idx)
-            return df
+            return pd.read_excel(file, sheet_name=0, header=idx)
         except Exception:
             return None
 
-    # 1) Try preferred header row
     if preferred_header_index is not None:
         df = _read(preferred_header_index)
         if df is not None:
@@ -171,21 +200,20 @@ def load_with_header_auto(file, preferred_header_index=None, is_orders=False):
             if not miss:
                 return df
 
-    # 2) Try scanning 0..30
-    for idx in list(range(0, 31)):
-        if idx in tried: continue
+    for idx in range(0, 31):
+        if idx in tried: 
+            continue
         df = _read(idx)
-        if df is None: continue
+        if df is None:
+            continue
         miss = validate_orders_columns(df) if is_orders else validate_notes_columns(df)
         if not miss:
             return df
 
-    # 3) Last resort: return the preferred/first read (even if invalid) so caller can show errors
+    # Fallback even if invalid so user sees what was read
     return _read(preferred_header_index or 0)
 
-# =========================
-# UI: Upload
-# =========================
+# ------------------ Uploads ----------------------
 with st.sidebar:
     st.markdown("### Upload Excel files")
     orders_file = st.file_uploader("Orders workbook (headers start on row 12)", type=["xlsx","xls"])
@@ -195,14 +223,12 @@ if not orders_file or not notes_file:
     st.info("Upload both **Orders** and **Notes** Excel files to begin.")
     st.stop()
 
-# Orders: header starts on row 12 (index 11). Auto-detect if needed.
+# Orders header on row 12 (index 11) by default
 orders_raw = load_with_header_auto(orders_file, preferred_header_index=11, is_orders=True)
 notes_raw  = load_with_header_auto(notes_file, preferred_header_index=0,  is_orders=False)
 
-# Validate and show helpful errors
 miss_orders = validate_orders_columns(orders_raw)
 miss_notes  = validate_notes_columns(notes_raw)
-
 if miss_orders or miss_notes:
     if miss_orders:
         st.error("Missing columns in Orders:\n- " + "\n- ".join(miss_orders))
@@ -210,15 +236,13 @@ if miss_orders or miss_notes:
         st.error("Missing columns in Notes:\n- " + "\n- ".join(miss_notes))
     st.stop()
 
-# Map to canonical frames
 orders = map_orders(orders_raw)
 notes  = map_notes(notes_raw)
 
-# Sort notes by time & group
+# ------------------ Enrichment -------------------
 notes = notes.sort_values("noteAt", na_position="first")
 notes_by_id = notes.groupby("id")
 
-# Enrich
 enriched = []
 for _, row in orders.iterrows():
     stages, first_breach = compute_breaches(row)
@@ -236,9 +260,8 @@ for _, row in orders.iterrows():
         "notes": nb
     })
 
-# =========================
-# 1) Metrics
-# =========================
+# ------------------ KPIs -------------------------
+# Existing KPIs
 counts_by_stage = {k:0 for k in STAGE_ORDER}
 orders_with_breach = 0
 for er in enriched:
@@ -251,16 +274,20 @@ for er in enriched:
         orders_with_breach += 1
 total_breaches = sum(counts_by_stage.values())
 
+# NEW KPIs
+total_notes_created = len(notes)  # total number of notes
+orders_with_notes = notes["id"].nunique()  # distinct orders that have at least one note
+
 st.subheader("Metrics")
-c1,c2,c3,c4 = st.columns(4)
+c1, c2, c3, c4, c5, c6 = st.columns(6)
 c1.metric("Total Orders", f"{len(orders)}")
 c2.metric("Orders With Any Breach", f"{orders_with_breach}")
 c3.metric("Orders Without Breach", f"{len(orders)-orders_with_breach}")
 c4.metric("Total Breaches (All Stages)", f"{total_breaches}")
+c5.metric("Total Notes Created", f"{total_notes_created}")
+c6.metric("Orders With Notes", f"{orders_with_notes}")
 
-# =========================
-# 2) Breach Summary by Stage
-# =========================
+# ------------------ Summary Table ----------------
 st.subheader("Breach Summary by Stage")
 summary_df = pd.DataFrame([{
     "Stage": STAGE_LABELS[k],
@@ -271,9 +298,7 @@ st.dataframe(summary_df, use_container_width=True)
 st.download_button("Download Summary CSV", summary_df.to_csv(index=False).encode("utf-8"),
                    file_name="breach_summary_by_stage.csv", mime="text/csv")
 
-# =========================
-# 3) Order-Level Details (📊 Output Example)
-# =========================
+# ------------------ Output Table -----------------
 st.subheader("Order-Level Details (📊 Output Example)")
 out_rows = []
 for er in enriched:
@@ -300,4 +325,4 @@ st.dataframe(out_df, use_container_width=True)
 st.download_button("Download Output CSV", out_df.to_csv(index=False).encode("utf-8"),
                    file_name="order_level_output.csv", mime="text/csv")
 
-st.caption("Note: Orders loader assumes headers at row 12 by default and auto-detects if structure varies.")
+st.caption("Notes: Orders loader assumes headers at row 12 by default and auto-detects if structure varies. Toggle Light/Dark mode from the sidebar.")
