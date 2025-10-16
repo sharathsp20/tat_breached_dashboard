@@ -2,31 +2,40 @@ import streamlit as st
 import pandas as pd
 
 st.set_page_config(page_title="ONDC TAT Breach Dashboard", layout="wide")
-st.title("ONDC TAT Breach Dashboard (Streamlit • relaxed headers)")
+st.title("ONDC TAT Breach Dashboard (with Column Mapper)")
 
+# ---------- Helpers ----------
 def normalize(s: str) -> str:
-    return str(s or "").lower().strip().replace("\n", " ").replace("\t", " ").replace("  ", " ")
+    return str(s or "").strip()
 
 def to_dt(x):
+    """Robust: handles Excel serials, strings, timestamps, NaT."""
     if x is None or x == "" or (isinstance(x, float) and pd.isna(x)):
         return pd.NaT
     try:
-        return pd.to_datetime(x, errors="coerce")
+        # Try pandas first
+        dt = pd.to_datetime(x, errors="coerce")
+        if pd.isna(dt):
+            return pd.NaT
+        return dt
     except Exception:
         return pd.NaT
 
 def diff_min(a, b):
-    if pd.isna(a) or pd.isna(b): return None
-    try: return max(0, (b - a).total_seconds()/60.0)
-    except Exception: return None
+    if pd.isna(a) or pd.isna(b):
+        return None
+    try:
+        return max(0, (b - a).total_seconds() / 60.0)
+    except Exception:
+        return None
 
-def pick(row: pd.Series, candidates):
-    keys = {normalize(k): k for k in row.index}
-    for c in candidates:
-        k = keys.get(normalize(c))
-        if k is not None:
-            return row[k]
-    return None
+def fmt_time(x):
+    if pd.isna(x):
+        return "—"
+    try:
+        return pd.to_datetime(x).strftime("%H:%M")
+    except Exception:
+        return "—"
 
 STAGE_LABELS = {
     "created_to_placed": "Created → Placed",
@@ -38,78 +47,23 @@ STAGE_LABELS = {
 THRESHOLDS = {
     "created_to_placed": 5,
     "placed_to_accepted": 7,
-    "accepted_to_in_kitchen": 5,
-    "in_kitchen_to_ready": 15,
+    "accepted_to_in_kitchen": 5,   # part of 20
+    "in_kitchen_to_ready": 15,     # part of 20
     "ready_to_shipped": 10,
 }
 STAGE_ORDER = list(STAGE_LABELS.keys())
 
-# --- ALIASES updated to be more tolerant ---
-ORDER_ID_ALIASES = [
-    "Network Order Id", "Network Order ID", "Network order id", "network order id",
-    "Order ID", "Order Id", "order id",
-    "Order No", "Order Number", "Order #",
-    "Network Ref", "Order Reference"
-]
-NOTES_ID_ALIASES = [
-    "Network order ID", "Network Order Id", "Network Order ID", "Network order id",
-    "Order ID", "Order Id", "Order No", "Order Number", "Order #",
-    "Order Reference", "Network Ref"
-]
-
-ORDERS_COL_ALIASES = {
-    "createdOn": ["Created On", "Created", "Created Date", "Created Time"],
-    "placedAt": ["Order Placed Time", "Placed At", "Order Placed", "Placed Time"],
-    "acceptedAt": ["Order Accepted Time", "Accepted At", "Order Accepted", "Accepted Time"],
-    "readyAt": ["Order Ready Time", "Ready At", "Order Ready", "Ready Time"],
-    "shippedAt": ["Shipped At Date & Time", "Shipped at", "Shipped At", "Shipped Time", "Out For Delivery"],
-}
-
-NOTES_COL_ALIASES = {
-    "noteAt": ["Created at", "Note Time", "Created On", "Created"],
-    "description": ["Description", "Notes", "Comment", "Body"],
-}
-
-def map_orders(df: pd.DataFrame) -> pd.DataFrame:
-    out = []
-    for _, r in df.iterrows():
-        idv = pick(r, ORDER_ID_ALIASES)
-        if pd.isna(idv):
-            continue
-        out.append({
-            "id": str(idv).strip(),
-            "createdOn": to_dt(pick(r, ORDERS_COL_ALIASES["createdOn"])),
-            "placedAt": to_dt(pick(r, ORDERS_COL_ALIASES["placedAt"])),
-            "acceptedAt": to_dt(pick(r, ORDERS_COL_ALIASES["acceptedAt"])),
-            "readyAt": to_dt(pick(r, ORDERS_COL_ALIASES["readyAt"])),
-            "shippedAt": to_dt(pick(r, ORDERS_COL_ALIASES["shippedAt"])),
-        })
-    return pd.DataFrame(out)
-
-def map_notes(df: pd.DataFrame) -> pd.DataFrame:
-    out = []
-    for _, r in df.iterrows():
-        idv = pick(r, NOTES_ID_ALIASES)
-        if pd.isna(idv):
-            continue
-        out.append({
-            "id": str(idv).strip(),
-            "noteAt": to_dt(pick(r, NOTES_COL_ALIASES["noteAt"])),
-            "description": pick(r, NOTES_COL_ALIASES["description"]) or "",
-        })
-    return pd.DataFrame(out)
-
-def compute_breaches(order_row: pd.Series):
+def compute_breaches(row):
     stages = []
-    a = diff_min(order_row["createdOn"], order_row["placedAt"])
-    stages.append({"key":"created_to_placed","label":STAGE_LABELS["created_to_placed"],"threshold":THRESHOLDS["created_to_placed"],"duration":a,"breached":(a is not None and a>THRESHOLDS["created_to_placed"]),"segmentEnd":order_row["placedAt"]})
-    b = diff_min(order_row["placedAt"], order_row["acceptedAt"])
-    stages.append({"key":"placed_to_accepted","label":STAGE_LABELS["placed_to_accepted"],"threshold":THRESHOLDS["placed_to_accepted"],"duration":b,"breached":(b is not None and b>THRESHOLDS["placed_to_accepted"]),"segmentEnd":order_row["acceptedAt"]})
-    c = diff_min(order_row["acceptedAt"], order_row["readyAt"])
-    stages.append({"key":"accepted_to_in_kitchen","label":STAGE_LABELS["accepted_to_in_kitchen"],"threshold":THRESHOLDS["accepted_to_in_kitchen"],"duration":c,"breached":(c is not None and c>THRESHOLDS["accepted_to_in_kitchen"]),"segmentEnd":order_row["readyAt"]})
-    stages.append({"key":"in_kitchen_to_ready","label":STAGE_LABELS["in_kitchen_to_ready"],"threshold":THRESHOLDS["in_kitchen_to_ready"],"duration":c,"breached":(c is not None and c>THRESHOLDS["in_kitchen_to_ready"]),"segmentEnd":order_row["readyAt"]})
-    d = diff_min(order_row["readyAt"], order_row["shippedAt"])
-    stages.append({"key":"ready_to_shipped","label":STAGE_LABELS["ready_to_shipped"],"threshold":THRESHOLDS["ready_to_shipped"],"duration":d,"breached":(d is not None and d>THRESHOLDS["ready_to_shipped"]),"segmentEnd":order_row["shippedAt"]})
+    a = diff_min(row["createdOn"], row["placedAt"])
+    stages.append({"key":"created_to_placed","label":STAGE_LABELS["created_to_placed"],"threshold":THRESHOLDS["created_to_placed"],"duration":a,"breached":(a is not None and a>THRESHOLDS["created_to_placed"]),"segmentEnd":row["placedAt"]})
+    b = diff_min(row["placedAt"], row["acceptedAt"])
+    stages.append({"key":"placed_to_accepted","label":STAGE_LABELS["placed_to_accepted"],"threshold":THRESHOLDS["placed_to_accepted"],"duration":b,"breached":(b is not None and b>THRESHOLDS["placed_to_accepted"]),"segmentEnd":row["acceptedAt"]})
+    c = diff_min(row["acceptedAt"], row["readyAt"])
+    stages.append({"key":"accepted_to_in_kitchen","label":STAGE_LABELS["accepted_to_in_kitchen"],"threshold":THRESHOLDS["accepted_to_in_kitchen"],"duration":c,"breached":(c is not None and c>THRESHOLDS["accepted_to_in_kitchen"]),"segmentEnd":row["readyAt"]})
+    stages.append({"key":"in_kitchen_to_ready","label":STAGE_LABELS["in_kitchen_to_ready"],"threshold":THRESHOLDS["in_kitchen_to_ready"],"duration":c,"breached":(c is not None and c>THRESHOLDS["in_kitchen_to_ready"]),"segmentEnd":row["readyAt"]})
+    d = diff_min(row["readyAt"], row["shippedAt"])
+    stages.append({"key":"ready_to_shipped","label":STAGE_LABELS["ready_to_shipped"],"threshold":THRESHOLDS["ready_to_shipped"],"duration":d,"breached":(d is not None and d>THRESHOLDS["ready_to_shipped"]),"segmentEnd":row["shippedAt"]})
     breached = [s for s in stages if s["breached"]]
     first_breach = None
     if breached:
@@ -117,130 +71,176 @@ def compute_breaches(order_row: pd.Series):
         first_breach = breached[0]
     return stages, first_breach
 
-def fmt_time(x):
-    if pd.isna(x): return "—"
-    try: return pd.to_datetime(x).strftime("%H:%M")
-    except: return "—"
-
+# ---------- Upload ----------
 with st.sidebar:
-    st.markdown("### Upload Excel files")
-    orders_file = st.file_uploader("Orders (Ondc-order-export)", type=["xlsx","xls"])
-    notes_file  = st.file_uploader("Notes (Order-note-export-data)", type=["xlsx","xls"])
+    st.markdown("### Upload Excel files (first sheet used)")
+    orders_file = st.file_uploader("Orders workbook", type=["xlsx","xls"], key="orders")
+    notes_file  = st.file_uploader("Notes workbook",  type=["xlsx","xls"], key="notes")
 
-if orders_file and notes_file:
-    try:
-        orders_raw = pd.read_excel(orders_file)
-        notes_raw  = pd.read_excel(notes_file)
-
-        # Relaxed validation: check presence of at least one alias for each required field
-        def has_any(colset, aliases):
-            norm = {normalize(c) for c in colset}
-            return any(normalize(a) in norm for a in aliases)
-
-        missing_msgs = []
-        # Required join key
-        if not has_any(orders_raw.columns, ORDER_ID_ALIASES):
-            missing_msgs.append("Orders: any of " + ", ".join(ORDER_ID_ALIASES))
-        if not has_any(notes_raw.columns, NOTES_ID_ALIASES):
-            missing_msgs.append("Notes: any of " + ", ".join(NOTES_ID_ALIASES))
-        # Required time columns in Orders
-        for field, aliases in ORDERS_COL_ALIASES.items():
-            if not has_any(orders_raw.columns, aliases):
-                missing_msgs.append(f"Orders: any of {aliases} for '{field}'")
-        # Notes timestamp
-        if not has_any(notes_raw.columns, NOTES_COL_ALIASES["noteAt"]):
-            missing_msgs.append("Notes: any of " + ", ".join(NOTES_COL_ALIASES["noteAt"]))
-        # Description optional — warn only
-        if not has_any(notes_raw.columns, NOTES_COL_ALIASES["description"]):
-            st.info("Notes file missing a description column — output will leave it blank.")
-
-        if missing_msgs:
-            st.error("Missing columns:\n- " + "\n- ".join(missing_msgs))
-            st.stop()
-
-        orders = map_orders(orders_raw)
-        notes  = map_notes(notes_raw)
-
-        notes = notes.sort_values("noteAt", na_position="first")
-        notes_by_id = notes.groupby("id")
-
-        enriched = []
-        for _, row in orders.iterrows():
-            stages, first_breach = compute_breaches(row)
-            group = notes_by_id.get_group(row["id"]) if row["id"] in notes_by_id.groups else pd.DataFrame(columns=notes.columns)
-            nb = []
-            for _, n in group.iterrows():
-                after = any(s["breached"] and (not pd.isna(s["segmentEnd"])) and (not pd.isna(n["noteAt"])) and n["noteAt"] > s["segmentEnd"] for s in stages)
-                nb.append({**n.to_dict(), "afterAnyBreach": after})
-            enriched.append({
-                "id": row["id"],
-                "stages": stages,
-                "first_breach": first_breach,
-                "createdOn": row["createdOn"],
-                "placedAt": row["placedAt"],
-                "acceptedAt": row["acceptedAt"],
-                "readyAt": row["readyAt"],
-                "shippedAt": row["shippedAt"],
-                "notes": nb
-            })
-
-        # Metrics
-        counts_by_stage = {k:0 for k in STAGE_ORDER}
-        orders_with_breach = 0
-        for er in enriched:
-            any_breach = False
-            for s in er["stages"]:
-                if s["breached"]:
-                    counts_by_stage[s["key"]] += 1
-                    any_breach = True
-            if any_breach:
-                orders_with_breach += 1
-        total_breaches = sum(counts_by_stage.values())
-
-        st.subheader("Metrics")
-        c1,c2,c3,c4 = st.columns(4)
-        c1.metric("Total Orders", f"{len(orders)}")
-        c2.metric("Orders With Any Breach", f"{orders_with_breach}")
-        c3.metric("Orders Without Breach", f"{len(orders)-orders_with_breach}")
-        c4.metric("Total Breaches (All Stages)", f"{total_breaches}")
-
-        st.subheader("Breach Summary by Stage")
-        summary_df = pd.DataFrame([{
-            "Stage": STAGE_LABELS[k],
-            "Threshold (min)": THRESHOLDS[k],
-            "Breached Count": counts_by_stage[k]
-        } for k in STAGE_ORDER])
-        st.dataframe(summary_df, use_container_width=True)
-        st.download_button("Download Summary CSV", summary_df.to_csv(index=False).encode("utf-8"), "breach_summary_by_stage.csv", "text/csv")
-
-        st.subheader("Order-Level Details (📊 Output Example)")
-        out_rows = []
-        for er in enriched:
-            fb = er["first_breach"]
-            first_stage = STAGE_LABELS.get(fb["key"], "None") if fb else "None"
-            breach_time = fb["segmentEnd"] if fb else pd.NaT
-            latest_note = er["notes"][-1] if len(er["notes"]) else None
-            note_time = latest_note["noteAt"] if latest_note is not None else pd.NaT
-            note_desc = latest_note["description"] if latest_note is not None else ""
-            if latest_note is None:
-                note_status = "—"
-            else:
-                note_status = "🔴 After breach" if (not pd.isna(breach_time) and not pd.isna(note_time) and note_time > breach_time) else "🟢 Before breach"
-            out_rows.append({
-                "Network Order ID": er["id"],
-                "Breached Stage": first_stage,
-                "Breach Time": fmt_time(breach_time),
-                "Notes Added Time": fmt_time(note_time),
-                "Note Description": note_desc,
-                "Note Added Status": note_status
-            })
-        out_df = pd.DataFrame(out_rows)
-        st.dataframe(out_df, use_container_width=True)
-        st.download_button("Download Output CSV", out_df.to_csv(index=False).encode("utf-8"), "order_level_output.csv", "text/csv")
-
-    except Exception as e:
-        st.error(f"Failed to parse/process: {e}")
-else:
+if not orders_file or not notes_file:
     st.info("Upload both **Orders** and **Notes** Excel files in the sidebar to begin.")
+    st.stop()
 
-st.caption("Tip: If hosting on Streamlit Community Cloud, include requirements.txt with: streamlit, pandas, openpyxl")
+# Read first sheet as-is (no assumptions about headers)
+orders_df_raw = pd.read_excel(orders_file, sheet_name=0)
+notes_df_raw  = pd.read_excel(notes_file,  sheet_name=0)
+
+st.markdown("### 1) Map your columns")
+with st.expander("Show detected columns", expanded=False):
+    st.write("**Orders columns:**", list(orders_df_raw.columns))
+    st.write("**Notes columns:**", list(notes_df_raw.columns))
+
+# ---------- Column mapping UI ----------
+st.markdown("**Orders mapping**")
+oc1, oc2 = st.columns(2)
+oc3, oc4 = st.columns(2)
+oc5, oc6 = st.columns(2)
+
+orders_cols = ["— Select —"] + [str(c) for c in orders_df_raw.columns]
+
+order_id_col  = oc1.selectbox("Order ID column (join key)", orders_cols, index=0, key="oid")
+created_col   = oc2.selectbox("Created On", orders_cols, index=0, key="ocreated")
+placed_col    = oc3.selectbox("Order Placed Time", orders_cols, index=0, key="oplaced")
+accepted_col  = oc4.selectbox("Order Accepted Time", orders_cols, index=0, key="oaccepted")
+ready_col     = oc5.selectbox("Order Ready Time", orders_cols, index=0, key="oready")
+shipped_col   = oc6.selectbox("Shipped At Date & Time", orders_cols, index=0, key="oshipped")
+
+st.markdown("**Notes mapping**")
+nc1, nc2, nc3 = st.columns(3)
+notes_cols = ["— Select —"] + [str(c) for c in notes_df_raw.columns]
+note_id_col   = nc1.selectbox("Notes: Order ID column (join key)", notes_cols, index=0, key="nid")
+note_time_col = nc2.selectbox("Notes: Created at", notes_cols, index=0, key="ntime")
+note_desc_col = nc3.selectbox("Notes: Description (optional)", notes_cols, index=0, key="ndesc")
+
+# Validate mapping
+missing = []
+if order_id_col == "— Select —":  missing.append("Orders: Order ID")
+if created_col  == "— Select —":  missing.append("Orders: Created On")
+if placed_col   == "— Select —":  missing.append("Orders: Order Placed Time")
+if accepted_col == "— Select —":  missing.append("Orders: Order Accepted Time")
+if ready_col    == "— Select —":  missing.append("Orders: Order Ready Time")
+if shipped_col  == "— Select —":  missing.append("Orders: Shipped At Date & Time")
+if note_id_col  == "— Select —":  missing.append("Notes: Order ID")
+if note_time_col== "— Select —":  missing.append("Notes: Created at")
+# description optional
+
+if missing:
+    st.warning("Please map all required fields:\n\n- " + "\n- ".join(missing))
+    st.stop()
+
+# ---------- Build canonical data using mapping ----------
+def build_orders(df):
+    rows = []
+    for _, r in df.iterrows():
+        oid = r[order_id_col]
+        if pd.isna(oid):
+            continue
+        rows.append({
+            "id": str(oid).strip(),
+            "createdOn": to_dt(r[created_col]),
+            "placedAt":  to_dt(r[placed_col]),
+            "acceptedAt":to_dt(r[accepted_col]),
+            "readyAt":   to_dt(r[ready_col]),
+            "shippedAt": to_dt(r[shipped_col]),
+        })
+    return pd.DataFrame(rows)
+
+def build_notes(df):
+    rows = []
+    for _, r in df.iterrows():
+        nid = r[note_id_col]
+        if pd.isna(nid):
+            continue
+        rows.append({
+            "id": str(nid).strip(),
+            "noteAt": to_dt(r[note_time_col]),
+            "description": "" if note_desc_col == "— Select —" else (r[note_desc_col] if pd.notna(r[note_desc_col]) else "")
+        })
+    return pd.DataFrame(rows)
+
+orders = build_orders(orders_df_raw)
+notes  = build_notes(notes_df_raw)
+
+# Index/sort notes
+notes = notes.sort_values("noteAt", na_position="first")
+notes_by_id = notes.groupby("id")
+
+# Enrich orders
+enriched = []
+for _, row in orders.iterrows():
+    stages, first_breach = compute_breaches(row)
+    group = notes_by_id.get_group(row["id"]) if row["id"] in notes_by_id.groups else pd.DataFrame(columns=notes.columns)
+    nb = []
+    for _, n in group.iterrows():
+        after = any(s["breached"] and (not pd.isna(s["segmentEnd"])) and (not pd.isna(n["noteAt"])) and n["noteAt"] > s["segmentEnd"] for s in stages)
+        nb.append({**n.to_dict(), "afterAnyBreach": after})
+    enriched.append({
+        "id": row["id"],
+        "stages": stages,
+        "first_breach": first_breach,
+        "createdOn": row["createdOn"],
+        "placedAt": row["placedAt"],
+        "acceptedAt": row["acceptedAt"],
+        "readyAt": row["readyAt"],
+        "shippedAt": row["shippedAt"],
+        "notes": nb
+    })
+
+# ---------- 1) Metrics ----------
+counts_by_stage = {k:0 for k in STAGE_ORDER}
+orders_with_breach = 0
+for er in enriched:
+    any_breach = False
+    for s in er["stages"]:
+        if s["breached"]:
+            counts_by_stage[s["key"]] += 1
+            any_breach = True
+    if any_breach:
+        orders_with_breach += 1
+total_breaches = sum(counts_by_stage.values())
+
+st.subheader("Metrics")
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Total Orders", f"{len(orders)}")
+c2.metric("Orders With Any Breach", f"{orders_with_breach}")
+c3.metric("Orders Without Breach", f"{len(orders)-orders_with_breach}")
+c4.metric("Total Breaches (All Stages)", f"{total_breaches}")
+
+# ---------- 2) Breach Summary by Stage ----------
+st.subheader("Breach Summary by Stage")
+summary_df = pd.DataFrame([{
+    "Stage": STAGE_LABELS[k],
+    "Threshold (min)": THRESHOLDS[k],
+    "Breached Count": counts_by_stage[k]
+} for k in STAGE_ORDER])
+st.dataframe(summary_df, use_container_width=True)
+st.download_button("Download Summary CSV", summary_df.to_csv(index=False).encode("utf-8"),
+                   file_name="breach_summary_by_stage.csv", mime="text/csv")
+
+# ---------- 3) Order-Level Details (📊 Output Example) ----------
+st.subheader("Order-Level Details (📊 Output Example)")
+out_rows = []
+for er in enriched:
+    fb = er["first_breach"]
+    first_stage = STAGE_LABELS.get(fb["key"], "None") if fb else "None"
+    breach_time = fb["segmentEnd"] if fb else pd.NaT
+    latest_note = er["notes"][-1] if len(er["notes"]) else None
+    note_time = latest_note["noteAt"] if latest_note is not None else pd.NaT
+    note_desc = latest_note["description"] if latest_note is not None else ""
+    if latest_note is None:
+        note_status = "—"
+    else:
+        note_status = "🔴 After breach" if (not pd.isna(breach_time) and not pd.isna(note_time) and note_time > breach_time) else "🟢 Before breach"
+    out_rows.append({
+        "Network Order ID": er["id"],
+        "Breached Stage": first_stage,
+        "Breach Time": fmt_time(breach_time),
+        "Notes Added Time": fmt_time(note_time),
+        "Note Description": str(note_desc) if note_desc is not None else ""
+    |   ,  # <-- keep this line clean if you copy; it's just to avoid formatting glitches
+        "Note Added Status": note_status
+    })
+out_df = pd.DataFrame(out_rows)
+st.dataframe(out_df, use_container_width=True)
+st.download_button("Download Output CSV", out_df.to_csv(index=False).encode("utf-8"),
+                   file_name="order_level_output.csv", mime="text/csv")
