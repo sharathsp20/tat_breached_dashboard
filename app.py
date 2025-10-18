@@ -3,29 +3,26 @@ import pandas as pd
 
 # ------------------ App Config ------------------
 st.set_page_config(page_title="ONDC TAT Breach Dashboard", layout="wide")
+st.markdown("<br>", unsafe_allow_html=True)
 st.title("ONDC TAT Breach Dashboard")
 
 # ------------------ Base Light Theme ------------
 st.markdown("""
 <style>
-html, body, [class^="css"]  {
-    background-color: #ffffff !important;
-    color: #111827 !important;
-}
+html, body, [class^="css"]  { background-color: #ffffff !important; color:#111827 !important; }
 .block-container { padding-top: 1.5rem; }
-.stDataFrame [data-testid="stTable"] th {
-    background:#f3f4f6 !important; color:#111827 !important;
-}
-.stDataFrame [data-testid="stTable"] td {
-    background:#ffffff !important; color:#111827 !important;
-}
+.stDataFrame [data-testid="stTable"] th { background:#f3f4f6 !important; color:#111827 !important; }
+.stDataFrame [data-testid="stTable"] td { background:#ffffff !important; color:#111827 !important; }
 .stDownloadButton > button, .stButton > button {
-    background:#ffffff !important; color:#111827 !important; border:1px solid #d1d5db !important;
+  background:#ffffff !important; color:#111827 !important; border:1px solid #d1d5db !important;
 }
+pre.note { white-space: pre-wrap; word-break: break-word; background:#f9fafb; border:1px solid #e5e7eb; padding:.75rem; border-radius:.5rem; }
 </style>
 """, unsafe_allow_html=True)
 
 # ------------------ Helpers ---------------------
+BREACH_NOTE_GRACE_MIN = 5  # minutes window for "within 5 mins of breach"
+
 def normalize(s: str) -> str:
     return str(s or "").lower().strip().replace("\n", " ").replace("\t", " ").replace("  ", " ")
 
@@ -44,7 +41,7 @@ def diff_min(a, b):
 
 def fmt_time(x):
     if pd.isna(x): return "—"
-    try: return pd.to_datetime(x).strftime("%H:%M")
+    try: return pd.to_datetime(x).strftime("%Y-%m-%d %H:%M")
     except: return "—"
 
 # ------------------ Stage config ----------------
@@ -56,33 +53,52 @@ STAGE_LABELS = {
     "ready_to_shipped": "Ready → Shipped",
 }
 THRESHOLDS = {
-    "created_to_placed": 5,
+    "created_to_placed": 5,    # treat "tpl_pending" as "order_placed" by using this stage
     "placed_to_accepted": 7,
     "accepted_to_in_kitchen": 5,
     "in_kitchen_to_ready": 15,
     "ready_to_shipped": 10,
 }
-STAGE_ORDER = list(STAGE_LABELS.keys())
+STAGE_ORDER = [
+    "created_to_placed",
+    "placed_to_accepted",
+    "accepted_to_in_kitchen",
+    "in_kitchen_to_ready",
+    "ready_to_shipped",
+]
 
 def compute_breaches(order_row: pd.Series):
     stages = []
-    a = diff_min(order_row["createdOn"], order_row["placedAt"])
-    stages.append({"key":"created_to_placed","label":STAGE_LABELS["created_to_placed"],"threshold":THRESHOLDS["created_to_placed"],"duration":a,"breached":(a is not None and a>THRESHOLDS["created_to_placed"]),"segmentEnd":order_row["placedAt"]})
-    b = diff_min(order_row["placedAt"], order_row["acceptedAt"])
-    stages.append({"key":"placed_to_accepted","label":STAGE_LABELS["placed_to_accepted"],"threshold":THRESHOLDS["placed_to_accepted"],"duration":b,"breached":(b is not None and b>THRESHOLDS["placed_to_accepted"]),"segmentEnd":order_row["acceptedAt"]})
-    c = diff_min(order_row["acceptedAt"], order_row["readyAt"])
-    stages.append({"key":"accepted_to_in_kitchen","label":STAGE_LABELS["accepted_to_in_kitchen"],"threshold":THRESHOLDS["accepted_to_in_kitchen"],"duration":c,"breached":(c is not None and c>THRESHOLDS["accepted_to_in_kitchen"]),"segmentEnd":order_row["readyAt"]})
-    stages.append({"key":"in_kitchen_to_ready","label":STAGE_LABELS["in_kitchen_to_ready"],"threshold":THRESHOLDS["in_kitchen_to_ready"],"duration":c,"breached":(c is not None and c>THRESHOLDS["in_kitchen_to_ready"]),"segmentEnd":order_row["readyAt"]})
-    d = diff_min(order_row["readyAt"], order_row["shippedAt"])
-    stages.append({"key":"ready_to_shipped","label":STAGE_LABELS["ready_to_shipped"],"threshold":THRESHOLDS["ready_to_shipped"],"duration":d,"breached":(d is not None and d>THRESHOLDS["ready_to_shipped"]),"segmentEnd":order_row["shippedAt"]})
-    breached = [s for s in stages if s["breached"]]
-    first_breach = None
-    if breached:
-        breached = sorted(breached, key=lambda s: (pd.Timestamp.min if pd.isna(s["segmentEnd"]) else s["segmentEnd"]))
-        first_breach = breached[0]
-    return stages, first_breach
 
-# ------------------ Header aliasing --------------
+    def add_stage(key, start, end):
+        dur = diff_min(start, end)
+        stages.append({
+            "key": key,
+            "label": STAGE_LABELS[key],
+            "threshold": THRESHOLDS[key],
+            "duration": dur,
+            "breached": (dur is not None and dur > THRESHOLDS[key]),
+            "segmentStart": start,
+            "segmentEnd": end
+        })
+
+    add_stage("created_to_placed", order_row["createdOn"],   order_row["placedAt"])
+    add_stage("placed_to_accepted", order_row["placedAt"],   order_row["acceptedAt"])
+    add_stage("accepted_to_in_kitchen", order_row["acceptedAt"], order_row["readyAt"])
+    add_stage("in_kitchen_to_ready",    order_row["acceptedAt"], order_row["readyAt"])
+    add_stage("ready_to_shipped",   order_row["readyAt"],    order_row["shippedAt"])
+
+    breached = [s for s in stages if s["breached"] and not pd.isna(s["segmentEnd"])]
+    first_breach = None
+    earliest_breach_time = pd.NaT
+    if breached:
+        breached = sorted(breached, key=lambda s: s["segmentEnd"])
+        first_breach = breached[0]
+        earliest_breach_time = first_breach["segmentEnd"]
+
+    return stages, first_breach, earliest_breach_time
+
+# ------------------ Headers ----------------
 ORDER_ID_ALIASES = [
     "Network Order Id", "Network Order ID", "Network order id", "order id",
     "Order ID", "Order No", "Order Number", "Order #", "Order Reference", "Network Ref"
@@ -101,6 +117,7 @@ NOTES_ID_ALIASES = [
 NOTES_COL_ALIASES = {
     "noteAt": ["Created at", "Note Time", "Created On", "Created"],
     "description": ["Description", "Notes", "Comment", "Body"],
+    "agent": ["Reported by", "Agent", "Agent Name", "User", "Updated By", "Created By", "Author", "Owner", "Assignee"]
 }
 
 def pick(row: pd.Series, candidates):
@@ -118,18 +135,18 @@ def has_any(colset, aliases):
 def validate_orders_columns(df: pd.DataFrame):
     miss = []
     if not has_any(df.columns, ORDER_ID_ALIASES):
-        miss.append("Orders: any of " + ", ".join(ORDER_ID_ALIASES))
+        miss.append("any of " + ", ".join(ORDER_ID_ALIASES))
     for field, aliases in ORDERS_COL_ALIASES.items():
         if not has_any(df.columns, aliases):
-            miss.append(f"Orders: any of {aliases} for '{field}'")
+            miss.append(f"any of {aliases} for '{field}'")
     return miss
 
 def validate_notes_columns(df: pd.DataFrame):
     miss = []
     if not has_any(df.columns, NOTES_ID_ALIASES):
-        miss.append("Notes: any of " + ", ".join(NOTES_ID_ALIASES))
+        miss.append("any of " + ", ".join(NOTES_ID_ALIASES))
     if not has_any(df.columns, NOTES_COL_ALIASES["noteAt"]):
-        miss.append("Notes: any of " + ", ".join(NOTES_COL_ALIASES["noteAt"]))
+        miss.append("any of " + ", ".join(NOTES_COL_ALIASES["noteAt"]))
     return miss
 
 def map_orders(df: pd.DataFrame) -> pd.DataFrame:
@@ -156,6 +173,7 @@ def map_notes(df: pd.DataFrame) -> pd.DataFrame:
             "id": str(idv).strip(),
             "noteAt": to_dt(pick(r, NOTES_COL_ALIASES["noteAt"])),
             "description": pick(r, NOTES_COL_ALIASES["description"]) or "",
+            "agent": (pick(r, NOTES_COL_ALIASES.get("agent", [])) or "").strip()
         })
     return pd.DataFrame(out)
 
@@ -165,14 +183,12 @@ def load_with_header_auto(file, preferred_header_index=None, is_orders=False):
             return pd.read_excel(file, sheet_name=0, header=idx)
         except Exception:
             return None
-
     if preferred_header_index is not None:
         df = _read(preferred_header_index)
         if df is not None:
             miss = validate_orders_columns(df) if is_orders else validate_notes_columns(df)
             if not miss:
                 return df
-
     for idx in range(0, 31):
         df = _read(idx)
         if df is None:
@@ -180,7 +196,6 @@ def load_with_header_auto(file, preferred_header_index=None, is_orders=False):
         miss = validate_orders_columns(df) if is_orders else validate_notes_columns(df)
         if not miss:
             return df
-
     return _read(preferred_header_index or 0)
 
 # ------------------ Upload ----------------------
@@ -208,26 +223,24 @@ if miss_orders or miss_notes:
 orders = map_orders(orders_raw)
 notes  = map_notes(notes_raw)
 
-# ------------------ Enrich -----------------------
 notes = notes.sort_values("noteAt", na_position="first")
 notes_by_id = notes.groupby("id")
 
 enriched = []
+earliest_breach_by_id = {}
 for _, row in orders.iterrows():
-    stages, first_breach = compute_breaches(row)
+    stages, first_breach, earliest_breach_time = compute_breaches(row)
     group = notes_by_id.get_group(row["id"]) if row["id"] in notes_by_id.groups else pd.DataFrame(columns=notes.columns)
-    nb = []
-    for _, n in group.iterrows():
-        after = any(s["breached"] and (not pd.isna(s["segmentEnd"])) and (not pd.isna(n["noteAt"])) and n["noteAt"] > s["segmentEnd"] for s in stages)
-        nb.append({**n.to_dict(), "afterAnyBreach": after})
     enriched.append({
         "id": row["id"],
         "stages": stages,
         "first_breach": first_breach,
+        "earliest_breach_time": earliest_breach_time,
         "createdOn": row["createdOn"], "placedAt": row["placedAt"],
         "acceptedAt": row["acceptedAt"], "readyAt": row["readyAt"], "shippedAt": row["shippedAt"],
-        "notes": nb
+        "notes": group
     })
+    earliest_breach_by_id[row["id"]] = earliest_breach_time
 
 # ------------------ KPIs -------------------------
 counts_by_stage = {k:0 for k in STAGE_ORDER}
@@ -254,42 +267,132 @@ c4.metric("Total Breaches (All Stages)", f"{total_breaches}")
 c5.metric("Total Notes Created", f"{total_notes_created}")
 c6.metric("Orders With Notes", f"{orders_with_notes}")
 
-# ------------------ Summary ---------------------
-st.subheader("Breach Summary by Stage")
+# ------------------ TAT Breach summary table  ---------------------
+st.subheader("TAT Breach Summary Table")
 summary_df = pd.DataFrame([{
     "Stage": STAGE_LABELS[k],
-    "Threshold (min)": THRESHOLDS[k],
+    "Breach in time system configured": THRESHOLDS[k],
     "Breached Count": counts_by_stage[k]
 } for k in STAGE_ORDER])
 st.dataframe(summary_df, use_container_width=True)
-st.download_button("Download Summary CSV", summary_df.to_csv(index=False).encode("utf-8"),
-                   file_name="breach_summary_by_stage.csv", mime="text/csv")
 
-# ------------------ Output Table ----------------
-st.subheader("Order-Level Details (📊 Output Example)")
+# ------------------ Agent Level Metrics - Notes --------
+st.subheader("Agent Level Metrics - Notes")
+
+def _nz_agent(x):
+    x = str(x or "").strip()
+    return x if x else "Unknown"
+
+agent_grp = notes.assign(agent=notes["agent"].apply(_nz_agent)).groupby("agent", dropna=False)
+agent_df = pd.DataFrame({
+    "agent name": agent_grp.size().index,
+    "number of notes added": agent_grp.size().values,
+    "unique order count": agent_grp["id"].nunique().values
+}).sort_values(["number of notes added", "unique order count"], ascending=[False, False])
+
+st.dataframe(agent_df, use_container_width=True)
+
+import io
+
+import io
+
+# ------------------ Order-Level table: multi-breach stages + breach flag ------------------
+st.subheader("Order Level TAT Breach & Notes Table")
+
+def fmt_td_gap(breach_time, note_time):
+    if pd.isna(breach_time) or pd.isna(note_time):
+        return "—"
+    try:
+        delta = note_time - breach_time
+        secs = int(delta.total_seconds())
+        sign = "-" if secs < 0 else ""
+        secs = abs(secs)
+        m, s = divmod(secs, 60)
+        return f"{sign}{m:02d}:{s:02d}"
+    except Exception:
+        return "—"
+
 out_rows = []
 for er in enriched:
-    fb = er["first_breach"]
-    first_stage = STAGE_LABELS.get(fb["key"], "None") if fb else "None"
-    breach_time = fb["segmentEnd"] if fb else pd.NaT
-    latest_note = er["notes"][-1] if len(er["notes"]) else None
-    note_time = latest_note["noteAt"] if latest_note is not None else pd.NaT
-    note_desc = latest_note["description"] if latest_note is not None else ""
-    if latest_note is None:
-        note_status = "—"
-    else:
-        note_status = "🔴 After breach" if (not pd.isna(breach_time) and not pd.isna(note_time) and note_time > breach_time) else "🟢 Before breach"
-    out_rows.append({
-        "Network Order ID": er["id"],
-        "Breached Stage": first_stage,
-        "Breach Time": fmt_time(breach_time),
-        "Notes Added Time": fmt_time(note_time),
-        "Note Description": str(note_desc) if note_desc is not None else "",
-        "Note Added Status": note_status
-    })
-out_df = pd.DataFrame(out_rows)
-st.dataframe(out_df, use_container_width=True)
-st.download_button("Download Output CSV", out_df.to_csv(index=False).encode("utf-8"),
-                   file_name="order_level_output.csv", mime="text/csv")
+    stages = er["stages"]
+    breached_stages = [s for s in stages if not pd.isna(s.get("segmentEnd"))]
 
-st.caption("Note: Orders loader assumes headers at row 12 by default and auto-detects if structure varies.")
+    if not breached_stages:
+        out_rows.append({
+            "Network Order ID": er["id"],
+            "TAT Breached (Yes/No)": "—",
+            "TAT Breached at Stage": "—",
+            "TAT Breached at Time": "—",
+            "Notes Added Time": "—",
+            "Agent": "—",
+            "Note Description": "—",
+            "Notes added within 5 mins of order stage TAT breached": "—",
+            "Notes added after 5 mins of order stage TAT breached": "—",
+            "Time gap between TAT breached and Notes added (mm:ss)": "—",
+        })
+        continue
+
+    for stage in breached_stages:
+        tat_stage_label = STAGE_LABELS.get(stage["key"], stage["key"])
+        tat_time = stage.get("segmentEnd")
+        breached_flag = stage.get("breached", False)
+
+        tat_breached_display = "🟢 Yes" if breached_flag else "🔴 No"
+
+        # If no notes, still show one line per stage
+        if er["notes"].empty:
+            out_rows.append({
+                "Network Order ID": er["id"],
+                "TAT Breached (Yes/No)": tat_breached_display,
+                "TAT Breached at Stage": tat_stage_label,
+                "TAT Breached at Time": fmt_time(tat_time),
+                "Notes Added Time": "—",
+                "Agent": "—",
+                "Note Description": "—",
+                "Notes added within 5 mins of order stage TAT breached": "—",
+                "Notes added after 5 mins of order stage TAT breached": "—",
+                "Time gap between TAT breached and Notes added (mm:ss)": "—",
+            })
+        else:
+            for _, n in er["notes"].iterrows():
+                note_time = n.get("noteAt")
+                note_agent = n.get("agent", "—")
+                note_desc = n.get("description", "—")
+
+                within5 = "—"
+                after5 = "—"
+                if breached_flag and not pd.isna(tat_time) and not pd.isna(note_time):
+                    if tat_time <= note_time <= tat_time + pd.Timedelta(minutes=BREACH_NOTE_GRACE_MIN):
+                        within5 = "🟢 Yes"
+                    elif note_time > tat_time + pd.Timedelta(minutes=BREACH_NOTE_GRACE_MIN):
+                        after5 = "🔴 Yes"
+
+                out_rows.append({
+                    "Network Order ID": er["id"],
+                    "TAT Breached (Yes/No)": tat_breached_display,
+                    "TAT Breached at Stage": tat_stage_label,
+                    "TAT Breached at Time": fmt_time(tat_time),
+                    "Notes Added Time": fmt_time(note_time),
+                    "Agent": str(note_agent) if note_agent else "—",
+                    "Note Description": str(note_desc) if note_desc else "—",
+                    "Notes added within 5 mins of order stage TAT breached": within5,
+                    "Notes added after 5 mins of order stage TAT breached": after5,
+                    "Time gap between TAT breached and Notes added (mm:ss)": fmt_td_gap(tat_time, note_time),
+                })
+
+out_df = pd.DataFrame(out_rows)
+st.dataframe(out_df, use_container_width=True, height=650)
+
+# ------------------ Excel Export ------------------
+buffer = io.BytesIO()
+with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+    out_df.to_excel(writer, index=False, sheet_name="Order_Level_TAT_Breach")
+    writer.close()
+buffer.seek(0)
+
+st.download_button(
+    label="Download Order-Level Output (Excel)",
+    data=buffer,
+    file_name="order_level_output.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
